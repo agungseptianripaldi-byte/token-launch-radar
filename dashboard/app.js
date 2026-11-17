@@ -1,4 +1,4 @@
-// Token Radar's dashboard, model radar-3. It reads window.RADAR (written beside dashboard/ by
+// Token Radar's dashboard, model radar-4. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, the comps scatter with the fitted curve, filters, a
 // per-protocol detail drawer with the model's own inputs, the farm economics and the protocol's
 // farm plan, and the model panel with the fit, its blind test and every category factor. No
@@ -95,15 +95,9 @@
   }
 
   // The farm plan is the same derivation main.ts writes to board.json: category, chains, TVL,
-  // age and the row's own economics decide the action, the capital, the hold and every cost
+  // age and the row's own economics decide the action, the deposit, the hold and every cost
   // and time. No name is special-cased.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
-  function capitalFor(p) {
-    if (p.tvl_usd >= 5e9) return 250;
-    if (p.tvl_usd >= 1e9) return 150;
-    if (p.tvl_usd >= 1e8) return 100;
-    return 50;
-  }
   function holdDaysFor(age) {
     if (age === null || age === undefined) return 30;
     if (age < 180) return 60;
@@ -149,19 +143,21 @@
   }
   function farmSteps(p, deposit) {
     var chain = chainOf(p);
-    var capital = capitalFor(p);
+    var multichain = p.chains && p.chains.length > 1;
+    var main = multichain ? Math.round(deposit * 0.75) : deposit;
+    var bridge = deposit - main;
     var hold = holdDaysFor(p.age_days);
     var econ = econOf(p, deposit);
     var steps = [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
-      { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' }
+      { text: actionFor(p, main, chain), cost: '$' + main + ' of capital and about $' + (main >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' }
     ];
-    if (p.chains && p.chains.length > 1) {
-      steps.push({ text: 'Use the position on a second chain too: bridge $' + capital + ' of the deposit to ' + p.chains[1] + ' and repeat the main action there, so the wallet is active on both chains.', cost: 'about $4 of bridge fees', time: '15 minutes' });
+    if (multichain) {
+      steps.push({ text: 'Use the position on a second chain too: bridge $' + bridge + ' of the deposit to ' + p.chains[1] + ' and repeat the main action there, so the wallet is active on both chains.', cost: 'about $4 of bridge fees', time: '15 minutes' });
     }
     steps.push(
       { text: 'Make one qualifying action each week, such as ' + weeklyActionFor(p) + ', so the wallet stays active.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + deposit + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open " + p.name + "'s own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Price the plan before you start: a $' + deposit.toLocaleString('en-US') + ' deposit earns a slice of about $' + econ.slice + ' if the launch prices at the board\'s ' + fmtUsd(p.implied_value_usd) + ' implied value, against about $' + econ.fees + ' of fees, for a net of about $' + econ.net + ' (verdict ' + econ.verdict + ').', cost: 'nothing to check', time: '5 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
@@ -263,6 +259,7 @@
 
   function lede() {
     var farm = DATA.rows.filter(function (r) { return r.verdict === 'FARM'; }).length;
+    var setAsideTotal = DATA.set_aside.reduce(function (n, r) { return n + r.count; }, 0);
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
@@ -271,7 +268,13 @@
           el('b', { text: fmtUsd(DATA.floor_usd) }),
           ' of TVL and no token on record. The early radar adds ',
           el('b', { text: String(DATA.early_size) }),
-          ' pre-token protocols below that floor, and the ones above it the watchlist rule leaves out. Implied value is a fitted model, not a promise: it prices a launch from the snapshot alone, and every row shows what a $1,000 deposit would net.'
+          ' pre-token protocols below that floor, and the ones above it the watchlist rule leaves out. Implied value is a fitted model, not a promise: it prices a launch from the snapshot alone, and every row shows what a $1,000 deposit would net. Of the ',
+          el('b', { text: String(DATA.pre_token_size) }),
+          ' pre-token protocols, ',
+          el('b', { text: String(DATA.board_size) }),
+          ' are ranked and ',
+          el('b', { text: String(setAsideTotal) }),
+          ' are set aside for the reasons in the model panel below.'
         )
       ),
       el('div', { class: 'facts' },
@@ -503,6 +506,10 @@
         el('td', { class: 'sub', text: c.samples >= m.min_category_samples ? 'median residual' : 'curve alone' })
       );
     });
+    var setAsideTotal = DATA.set_aside.reduce(function (n, r) { return n + r.count; }, 0);
+    var setAsideRows = DATA.set_aside.map(function (r) {
+      return el('tr', null, el('td', { text: r.reason }), el('td', { class: 'num', text: String(r.count) }));
+    });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one fitted function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
@@ -573,6 +580,35 @@
           el('p', { class: 'note' },
             el('b', { text: 'Bands: ' }),
             'every row carries its P25-P75 band and its P10-P90 band from the leave-one-out ratios, so a wide band says the price is uncertain, not that the row is wrong.'
+          )
+        )
+      ),
+      el('div', { class: 'model-grid' },
+        el('div', null,
+          el('h3', { text: 'Set aside, by reason' }),
+          el('div', { class: 'table-wrap' },
+            el('table', { class: 'mult-table' },
+              el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Reason' }), el('th', { scope: 'col', text: 'Protocols' }))),
+              el('tbody', null, setAsideRows.concat([
+                el('tr', null, el('td', { text: 'Total set aside' }), el('td', { class: 'num', text: String(setAsideTotal) }))
+              ]))
+            )
+          ),
+          el('p', { class: 'note', text: 'Of the ' + DATA.pre_token_size + ' pre-token protocols, ' + DATA.board_size + ' are ranked and ' + setAsideTotal + ' are set aside. ' + DATA.token_size + ' further protocols already have a token, so they were never candidates for a launch.' })
+        ),
+        el('div', null,
+          el('h3', { text: 'What set-aside means' }),
+          el('p', { class: 'note' },
+            el('b', { text: 'Not a verdict: ' }),
+            'a set-aside protocol is not a bad protocol. The board ranks launches that do not exist yet; a bridge or a liquid staking product already has its shape, and a versioned pool is one version of a product that already runs.'
+          ),
+          el('p', { class: 'note' },
+            el('b', { text: 'The rule is the same for every row: ' }),
+            'the reasons above are the board\'s own checks, run on the snapshot alone — category, name and token record — with no name special-cased.'
+          ),
+          el('p', { class: 'note' },
+            el('b', { text: 'Watchlist: ' }),
+            'every watchlist protocol is ranked, even one the set-aside rules would leave out; the watchlist is the floor, and the board never drops one of its rows.'
           )
         )
       )
