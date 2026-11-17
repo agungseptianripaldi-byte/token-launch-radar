@@ -1,4 +1,4 @@
-// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
 // board out.
 //
 // The board covers every protocol the snapshot's own record still leaves as a possible launch:
@@ -101,7 +101,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -252,6 +252,12 @@ export interface FitReport {
   flat_within_10x: number;
 }
 
+/** One reason pre-token protocols were set aside, and how many it excluded. */
+export interface SetAsideRow {
+  reason: string;
+  count: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, the fit, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -263,6 +269,9 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  pre_token_size: number;
+  token_size: number;
+  set_aside: SetAsideRow[];
   total_implied_usd: number;
   fit: FitReport;
   category_factors: CategoryFactor[];
@@ -581,6 +590,45 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
   return new Map(protocols.map((p) => [p.slug, p]));
 }
 
+/**
+ * The first rule in the board's own check order that keeps a pre-token protocol off the
+ * board, or null when the board ranks it. The reasons are mutually exclusive by
+ * construction — a protocol that fails no earlier rule fails the excluded-category rule —
+ * so their counts add up to every pre-token protocol the board leaves out.
+ */
+export function setAsideReason(p: SnapshotProtocol): string | null {
+  if (isRankable(p)) return null;
+  if (p.category === 'CEX') return 'Centralised exchange';
+  if (VERSIONED.test(p.name)) return 'Versioned name';
+  if (EXCHANGE_PREFIXES.some((prefix) => p.name.startsWith(prefix))) return 'Named for an exchange';
+  if (WRAPPED_WORD.test(p.name)) return 'Wrapped or staked name';
+  if (p.category === 'Bridge' || p.category === 'Canonical Bridge') return 'Bridge';
+  if (p.category === 'Liquid Staking' || p.category === 'Liquid Restaking' || p.category === 'Restaked BTC') return 'Liquid staking or restaking';
+  return 'Other';
+}
+
+/** The set-aside breakdown: one row per reason, in the board's check order, zero rows left out. */
+export function setAsideCounts(snapshot: Snapshot): SetAsideRow[] {
+  const order = [
+    'Centralised exchange',
+    'Versioned name',
+    'Named for an exchange',
+    'Wrapped or staked name',
+    'Bridge',
+    'Liquid staking or restaking',
+    'Other',
+  ];
+  const counts = new Map<string, number>();
+  for (const p of snapshot.protocols) {
+    if (!isPreToken(p)) continue;
+    const reason = setAsideReason(p);
+    if (reason !== null) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return order
+    .filter((reason) => (counts.get(reason) ?? 0) > 0)
+    .map((reason) => ({ reason, count: counts.get(reason)! }));
+}
+
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const comps = tradedComps(snapshot);
@@ -650,7 +698,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
         breadth_multiplier: round4(s.breadthMult),
         age_days: s.age,
       },
-      farm_steps: farmSteps(s.p, s.age, s.implied, econ).map(stepText),
+      farm_steps: farmSteps(s.p, s.age, s.implied, econ, model.deposit_usd).map(stepText),
     };
   });
 }
@@ -668,14 +716,6 @@ export function stepText(step: FarmStep): string {
 /** The first chain a protocol names, or a neutral phrase. */
 function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
-}
-
-/** How much capital one farm position needs, from the protocol's own TVL. */
-function capitalFor(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 5_000_000_000) return 250;
-  if (p.tvl_usd >= 1_000_000_000) return 150;
-  if (p.tvl_usd >= 100_000_000) return 100;
-  return 50;
 }
 
 /** How long to hold, from the protocol's age: younger protocols get a longer qualifying window. */
@@ -723,20 +763,25 @@ function weeklyActionFor(p: SnapshotProtocol): string {
 
 /**
  * A protocol's farm plan: the base steps, a second-chain step when it runs on more than one
- * chain, and an economics step that prices the plan itself. The plan is derived from the
- * protocol's own record (category, chains, TVL, age, implied value), never from a hand-written
- * list of names.
+ * chain, and an economics step that prices the plan itself. The plan spends the deposit
+ * itself — three quarters on the main chain, one quarter bridged to a second chain when the
+ * protocol runs on more than one — so the plan and the economics step price the same money.
+ * The plan is derived from the protocol's own record (category, chains, TVL, age, implied
+ * value), never from a hand-written list of names.
  */
 export function farmSteps(
   p: SnapshotProtocol,
   age: number | null,
   implied: number,
   econ: { slice: number; fees: number; net: number; verdict: 'FARM' | 'THIN' | 'SKIP' },
+  deposit: number,
 ): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
+  const multichain = p.chains.length > 1;
+  const main = multichain ? Math.round(deposit * 0.75) : deposit;
+  const bridge = deposit - main;
   const hold = holdDaysFor(age);
-  const action = actionFor(p, capital, chain);
+  const action = actionFor(p, main, chain);
   const weekly = weeklyActionFor(p);
   const steps: FarmStep[] = [
     {
@@ -746,14 +791,14 @@ export function farmSteps(
     },
     {
       text: action,
-      cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
+      cost: `$${main} of capital and about $${main >= 150 ? 8 : 4} of gas`,
       time: '15 minutes to set up',
     },
   ];
-  if (p.chains.length > 1) {
+  if (multichain) {
     const second = p.chains[1]!;
     steps.push({
-      text: `Use the position on a second chain too: bridge $${capital} of the deposit to ${second} and repeat the main action there, so the wallet is active on both chains.`,
+      text: `Use the position on a second chain too: bridge $${bridge} of the deposit to ${second} and repeat the main action there, so the wallet is active on both chains.`,
       cost: 'about $4 of bridge fees',
       time: '15 minutes',
     });
@@ -766,7 +811,7 @@ export function farmSteps(
     },
     {
       text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
-      cost: `the $${capital} stays in the position`,
+      cost: `the $${deposit} stays in the position`,
       time: `${hold} days`,
     },
     {
@@ -775,7 +820,7 @@ export function farmSteps(
       time: '10 minutes',
     },
     {
-      text: `Price the plan before you start: a $1,000 deposit earns a slice of about $${econ.slice} if the launch prices at the board's $${implied.toLocaleString('en-US')} implied value, against about $${econ.fees} of fees, for a net of about $${econ.net} (verdict ${econ.verdict}).`,
+      text: `Price the plan before you start: a $${deposit.toLocaleString('en-US')} deposit earns a slice of about $${econ.slice} if the launch prices at the board's $${implied.toLocaleString('en-US')} implied value, against about $${econ.fees} of fees, for a net of about $${econ.net} (verdict ${econ.verdict}).`,
       cost: 'nothing to check',
       time: '5 minutes',
     },
@@ -847,6 +892,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
   const totalImplied = board.reduce((n, r) => n + r.implied_value_usd, 0);
+  const preToken = snapshot.protocols.filter(isPreToken).length;
+  const setAside = setAsideCounts(snapshot);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -857,6 +904,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    pre_token_size: preToken,
+    token_size: snapshot.protocols.length - preToken,
+    set_aside: setAside,
     total_implied_usd: totalImplied,
     fit: {
       // Full precision: the page recomputes every row from these two numbers, and a rounded
