@@ -1,4 +1,4 @@
-// Token Radar's model, version radar-4: one snapshot of the protocol universe in, one ranked
+// Token Radar's model, version radar-5: one snapshot of the protocol universe in, one ranked
 // board out.
 //
 // The board covers every protocol the snapshot's own record still leaves as a possible launch:
@@ -101,7 +101,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
